@@ -17,3 +17,5 @@ tqdm==4.65.0
 portalocker>=2.0.0
 geom-median
 pandas
+torch
+matplotlib
