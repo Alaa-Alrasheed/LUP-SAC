@@ -1,0 +1,535 @@
+# coding: utf-8
+# =============================================================================
+# sac_agent.py — Soft Actor-Critic agent for LUP genuine-cluster weighting.
+#
+# Replaces the discrete DQN with a continuous action α ∈ [0, 1] that
+# controls the weighted combination of the two AHC clusters.
+#
+# Components:
+#   • GaussianActor  — outputs μ, log_σ, samples via reparameterization
+#   • QCritic        — clipped double-Q (two Q-networks)
+#   • SACAgent       — full off-policy agent with automatic entropy tuning
+#   • CompositeRewardCalculator — R_t = R_dir + R_mag + R_var
+#       R_dir: CosineSimilarity(G_current, EMA_grad)          ∈ [-1, +1]
+#       R_mag: magnitude explosion penalty                    ∈ {-1, 0}
+#       R_var: normalized internal cluster variance penalty   ∈ [-1, 0]
+#       Total bounded roughly in [-2, +1] for SAC critic stability.
+#   • build_state_vector()       — same 12-dim state as dqn_agent.py
+# =============================================================================
+
+import random
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+from collections import deque
+
+LOG_STD_MIN = -20
+LOG_STD_MAX = 2
+
+
+# ──────────────────────── Replay Buffer ──────────────────────── #
+
+class ReplayBuffer:
+    """Fixed-size circular buffer for (S, A, R, S', done) transitions."""
+
+    def __init__(self, capacity: int = 10_000):
+        self.buffer: deque = deque(maxlen=capacity)
+
+    def push(self, state, action, reward, next_state, done):
+        self.buffer.append((
+            np.array(state, dtype=np.float32),
+            np.array([action], dtype=np.float32),
+            float(reward),
+            np.array(next_state, dtype=np.float32),
+            float(done),
+        ))
+
+    def sample(self, batch_size: int):
+        batch = random.sample(self.buffer, batch_size)
+        states, actions, rewards, next_states, dones = zip(*batch)
+        return (
+            np.array(states, dtype=np.float32),
+            np.array(actions, dtype=np.float32),
+            np.array(rewards, dtype=np.float32).reshape(-1, 1),
+            np.array(next_states, dtype=np.float32),
+            np.array(dones, dtype=np.float32).reshape(-1, 1),
+        )
+
+    def __len__(self):
+        return len(self.buffer)
+
+
+# ──────────────────────── Gaussian Actor ──────────────────────── #
+
+class GaussianActor(nn.Module):
+    """
+    Outputs a continuous action α ∈ [0, 1] via:
+        μ, log_σ = MLP(state)
+        z ~ N(μ, σ)      (reparameterized)
+        a_raw = tanh(z)   ∈ [-1, 1]
+        α = (a_raw + 1) / 2  ∈ [0, 1]
+    """
+
+    def __init__(self, state_dim: int = 12, hidden_dim: int = 64):
+        super().__init__()
+        self.shared = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+        )
+        self.mu_head = nn.Linear(hidden_dim, 1)
+        self.log_std_head = nn.Linear(hidden_dim, 1)
+
+    def forward(self, state):
+        h = self.shared(state)
+        mu = self.mu_head(h)
+        log_std = self.log_std_head(h)
+        log_std = torch.clamp(log_std, LOG_STD_MIN, LOG_STD_MAX)
+        return mu, log_std
+
+    def sample(self, state):
+        """
+        Returns
+        -------
+        action : tensor ∈ [0, 1]  — the trust weight α
+        log_prob : tensor          — log π(a|s) with tanh + rescale correction
+        """
+        mu, log_std = self.forward(state)
+        std = log_std.exp()
+        dist = torch.distributions.Normal(mu, std)
+
+        # Reparameterized sample
+        z = dist.rsample()
+        a_raw = torch.tanh(z)                     # ∈ [-1, 1]
+        action = (a_raw + 1.0) / 2.0              # ∈ [0, 1]
+
+        # Log-prob with tanh squashing correction + [0,1] rescale correction
+        log_prob = dist.log_prob(z)
+        log_prob -= torch.log(1.0 - a_raw.pow(2) + 1e-6)
+        log_prob -= np.log(2.0)  # Jacobian of (x+1)/2
+        log_prob = log_prob.sum(dim=-1, keepdim=True)
+
+        return action, log_prob
+
+    def deterministic(self, state):
+        """Deterministic action for evaluation (no noise)."""
+        mu, _ = self.forward(state)
+        return (torch.tanh(mu) + 1.0) / 2.0
+
+
+# ──────────────────────── Q-Critic ──────────────────────── #
+
+class QCritic(nn.Module):
+    """
+    Clipped double-Q: two independent Q(s, a) networks.
+    Input: state (12-dim) concatenated with action (1-dim) → 13-dim.
+    """
+
+    def __init__(self, state_dim: int = 12, hidden_dim: int = 64):
+        super().__init__()
+        input_dim = state_dim + 1  # state + action
+
+        self.q1 = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
+        self.q2 = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def forward(self, state, action):
+        sa = torch.cat([state, action], dim=-1)
+        return self.q1(sa), self.q2(sa)
+
+    def q1_forward(self, state, action):
+        sa = torch.cat([state, action], dim=-1)
+        return self.q1(sa)
+
+
+# ──────────────────────── SAC Agent ──────────────────────── #
+
+class SACAgent:
+    """
+    Soft Actor-Critic with:
+      • Continuous action α ∈ [0, 1]
+      • Clipped double-Q critics
+      • Automatic entropy coefficient (temperature) tuning
+      • Soft target network updates (τ)
+
+    Parameters
+    ----------
+    state_dim    : int   — state vector dimensionality  (12)
+    hidden_dim   : int   — hidden layer width            (64)
+    lr_actor     : float — actor learning rate            (3e-4)
+    lr_critic    : float — critic learning rate           (3e-4)
+    lr_alpha     : float — entropy coeff learning rate    (3e-4)
+    gamma        : float — discount factor                (0.99)
+    tau          : float — soft-update coefficient        (0.005)
+    buffer_size  : int   — replay buffer capacity         (10_000)
+    batch_size   : int   — minibatch size                 (64)
+    init_alpha   : float — initial entropy coefficient    (0.2)
+    target_entropy : float — target H (default: -dim(A)/2 = -0.5)
+    device       : str   — 'cpu' or 'cuda'
+    """
+
+    def __init__(self, state_dim=12, hidden_dim=64,
+                 lr_actor=3e-4, lr_critic=3e-4, lr_alpha=3e-4,
+                 gamma=0.99, tau=0.005,
+                 buffer_size=10_000, batch_size=64,
+                 init_alpha=0.2, target_entropy=None,
+                 device='cpu'):
+
+        self.device = torch.device(device)
+        self.gamma = gamma
+        self.tau = tau
+        self.batch_size = batch_size
+
+        # ---- Networks ----
+        self.actor = GaussianActor(state_dim, hidden_dim).to(self.device)
+        self.critic = QCritic(state_dim, hidden_dim).to(self.device)
+        self.critic_target = QCritic(state_dim, hidden_dim).to(self.device)
+        self.critic_target.load_state_dict(self.critic.state_dict())
+        self.critic_target.eval()
+
+        # ---- Optimizers ----
+        self.actor_optim = optim.Adam(self.actor.parameters(), lr=lr_actor)
+        self.critic_optim = optim.Adam(self.critic.parameters(), lr=lr_critic)
+
+        # ---- Automatic entropy tuning ----
+        self.target_entropy = target_entropy if target_entropy is not None else -0.5
+        self.log_alpha = torch.tensor(np.log(init_alpha), dtype=torch.float32,
+                                      device=self.device, requires_grad=True)
+        self.alpha_optim = optim.Adam([self.log_alpha], lr=lr_alpha)
+
+        # ---- Replay buffer ----
+        self.memory = ReplayBuffer(capacity=buffer_size)
+
+        # ---- Pending transition for delayed reward ----
+        self._pending_state = None
+        self._pending_action = None
+
+    @property
+    def alpha(self):
+        """Current entropy coefficient (temperature)."""
+        return self.log_alpha.exp().item()
+
+    # ──────── Action selection ──────── #
+
+    def select_action(self, state, deterministic=False):
+        """
+        Returns α ∈ [0, 1] — the trust weight for Cluster 1.
+
+        Parameters
+        ----------
+        state : np.ndarray of shape (12,)
+        deterministic : bool — if True, use mean (no sampling noise)
+        """
+        state_t = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            if deterministic:
+                action = self.actor.deterministic(state_t)
+            else:
+                action, _ = self.actor.sample(state_t)
+        return float(action.cpu().squeeze())
+
+    # ──────── Transition storage ──────── #
+
+    def store_transition(self, state, action, reward, next_state, done=False):
+        self.memory.push(state, action, reward, next_state, done)
+
+    def cache_pending(self, state, action):
+        """Cache (S_t, A_t) while waiting for R_t."""
+        self._pending_state = np.array(state, dtype=np.float32).copy()
+        self._pending_action = float(action)
+
+    def has_pending(self):
+        return self._pending_state is not None
+
+    def complete_pending(self, reward, next_state, done=False):
+        """Finalize the pending transition and push to buffer."""
+        if self._pending_state is None:
+            return
+        self.store_transition(self._pending_state, self._pending_action,
+                              reward, next_state, done)
+        self._pending_state = None
+        self._pending_action = None
+
+    # ──────── Network update ──────── #
+
+    def update_model(self):
+        """
+        One gradient step on actor, critic, and entropy coefficient.
+        Returns dict of losses for logging.
+        """
+        if len(self.memory) < self.batch_size:
+            return {'critic_loss': 0.0, 'actor_loss': 0.0, 'alpha': self.alpha}
+
+        states, actions, rewards, next_states, dones = self.memory.sample(
+            self.batch_size)
+
+        s = torch.FloatTensor(states).to(self.device)
+        a = torch.FloatTensor(actions).to(self.device)
+        r = torch.FloatTensor(rewards).to(self.device)
+        s2 = torch.FloatTensor(next_states).to(self.device)
+        d = torch.FloatTensor(dones).to(self.device)
+
+        alpha_val = self.log_alpha.exp().detach()
+
+        # ──── Critic update ──── #
+        with torch.no_grad():
+            next_action, next_log_prob = self.actor.sample(s2)
+            q1_target, q2_target = self.critic_target(s2, next_action)
+            q_target = torch.min(q1_target, q2_target)
+            y = r + self.gamma * (1.0 - d) * (q_target - alpha_val * next_log_prob)
+
+        q1, q2 = self.critic(s, a)
+        critic_loss = F.mse_loss(q1, y) + F.mse_loss(q2, y)
+
+        self.critic_optim.zero_grad()
+        critic_loss.backward()
+        nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=1.0)
+        self.critic_optim.step()
+
+        # ──── Actor update ──── #
+        new_action, log_prob = self.actor.sample(s)
+        q1_new = self.critic.q1_forward(s, new_action)
+        actor_loss = (alpha_val * log_prob - q1_new).mean()
+
+        self.actor_optim.zero_grad()
+        actor_loss.backward()
+        nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0)
+        self.actor_optim.step()
+
+        # ──── Entropy coefficient update ──── #
+        alpha_loss = -(self.log_alpha.exp() *
+                       (log_prob.detach() + self.target_entropy)).mean()
+
+        self.alpha_optim.zero_grad()
+        alpha_loss.backward()
+        self.alpha_optim.step()
+
+        # ──── Soft-update target critic ──── #
+        self._soft_update()
+
+        return {
+            'critic_loss': critic_loss.item(),
+            'actor_loss': actor_loss.item(),
+            'alpha': self.alpha,
+        }
+
+    def _soft_update(self):
+        for tp, p in zip(self.critic_target.parameters(),
+                         self.critic.parameters()):
+            tp.data.copy_(self.tau * p.data + (1.0 - self.tau) * tp.data)
+
+    # ──────── Persistence ──────── #
+
+    def save(self, path: str):
+        torch.save({
+            'actor': self.actor.state_dict(),
+            'critic': self.critic.state_dict(),
+            'critic_target': self.critic_target.state_dict(),
+            'actor_optim': self.actor_optim.state_dict(),
+            'critic_optim': self.critic_optim.state_dict(),
+            'log_alpha': self.log_alpha.detach().cpu(),
+            'alpha_optim': self.alpha_optim.state_dict(),
+        }, path)
+
+    def load(self, path: str):
+        ckpt = torch.load(path, map_location=self.device)
+        self.actor.load_state_dict(ckpt['actor'])
+        self.critic.load_state_dict(ckpt['critic'])
+        self.critic_target.load_state_dict(ckpt['critic_target'])
+        self.actor_optim.load_state_dict(ckpt['actor_optim'])
+        self.critic_optim.load_state_dict(ckpt['critic_optim'])
+        self.log_alpha = ckpt['log_alpha'].to(self.device).requires_grad_(True)
+        self.alpha_optim.load_state_dict(ckpt['alpha_optim'])
+
+
+# ──────────────── Composite Reward Calculator (Anti-Hijacking) ──────────────── #
+
+class CompositeRewardCalculator:
+    """
+    Hardened composite reward to prevent EMA momentum hijacking.
+
+    R_t = R_dir + R_mag + R_var
+
+    Components
+    ----------
+    R_dir (Direction):
+        CosineSimilarity(G_current, G_previous_EMA).
+        Range: [-1, +1].
+
+    R_mag (Magnitude Penalty):
+        If ||G_current||₂ > 2 × ||G_previous_EMA||₂ → R_mag = -1.0
+        Otherwise → R_mag = 0.0
+        Catches Sign-Flip and similar attacks that cause L2 norm explosions.
+
+    R_rep (Reputation Anchor):
+        Mean(RS_selected_clients) / (Max(RS_all_clients) + 1e-5).
+        Replaces R_var to defeat ByzMean's geometric cloaking.
+
+    Total reward bounded roughly in [-1.0, +2.0].
+
+    The EMA uses a slow decay (α=0.1 by default) so attackers cannot
+    corrupt the reference direction within a few rounds.
+    """
+
+    def __init__(self, ema_alpha: float = 0.1,
+                 mag_threshold_factor: float = 2.0,
+                 mag_penalty: float = -1.0):
+        """
+        Parameters
+        ----------
+        ema_alpha : float
+            Weight for new gradient in EMA update.  Kept low (0.1) to
+            resist poisoning — attacker needs ~10 consecutive hijacks
+            to significantly shift the reference.
+        mag_threshold_factor : float
+            If ||G||₂ > factor × ||EMA||₂, fire R_mag penalty.
+        mag_penalty : float
+            Flat penalty value when magnitude gate fires.
+        """
+        self.ema_alpha = ema_alpha
+        self.mag_threshold_factor = mag_threshold_factor
+        self.mag_penalty = mag_penalty
+
+        self._ema_grad = None
+        self._loss_history = []
+        
+        # Cached per-round: set by register_reputation() before compute_reward()
+        self._r_rep = None
+
+    # ── Loss tracking (kept for state builder compatibility) ──
+
+    def update_loss_history(self, loss: float):
+        self._loss_history.append(loss)
+
+    def get_ema_loss_trend(self) -> float:
+        """EMA trend over last 3 losses. Positive = loss rising."""
+        if len(self._loss_history) < 2:
+            return 0.0
+        window = self._loss_history[-3:]
+        diffs = [window[i+1] - window[i] for i in range(len(window)-1)]
+        return float(np.mean(diffs))
+
+    # ── EMA gradient tracking ──
+
+    def update_ema_grad(self, global_grad):
+        if self._ema_grad is None:
+            self._ema_grad = global_grad.copy()
+        else:
+            self._ema_grad = (self.ema_alpha * global_grad
+                              + (1.0 - self.ema_alpha) * self._ema_grad)
+
+    # ── Per-round reputation registration ──
+
+    def register_reputation(self, r_rep: float):
+        """
+        Call this each round with the calculated reputation score.
+        """
+        self._r_rep = r_rep
+
+    # ── Reward computation ──
+
+    def compute_reward(self, global_grad):
+        """
+        R_t = R_dir + R_mag + R_rep
+
+        Parameters
+        ----------
+        global_grad : np.ndarray
+            Flattened global gradient from current round.
+
+        Returns
+        -------
+        (reward, cos_sim, r_dir, r_mag, r_rep) : tuple
+            reward  — composite reward (float)
+            cos_sim — raw cosine similarity for logging (float)
+            r_dir   — directional reward component (float)
+            r_mag   — magnitude penalty component (float)
+            r_rep   — reputation anchor component (float)
+        """
+        # ─── R_dir: Directional momentum ───
+        if self._ema_grad is None:
+            cos_sim = 0.0
+        else:
+            dot = np.dot(global_grad, self._ema_grad)
+            norm_a = np.linalg.norm(global_grad) + 1e-10
+            norm_b = np.linalg.norm(self._ema_grad) + 1e-10
+            cos_sim = float(dot / (norm_a * norm_b))
+        r_dir = cos_sim
+
+        # ─── R_mag: Magnitude explosion penalty ───
+        r_mag = 0.0
+        if self._ema_grad is not None:
+            ema_norm = float(np.linalg.norm(self._ema_grad))
+            cur_norm = float(np.linalg.norm(global_grad))
+            if ema_norm > 1e-10 and cur_norm > self.mag_threshold_factor * ema_norm:
+                r_mag = self.mag_penalty  # -1.0
+
+        # ─── R_rep: Reputation Anchor ───
+        r_rep = self._r_rep if self._r_rep is not None else 0.0
+
+        # ─── Composite reward ───
+        reward = r_dir + r_mag + r_rep
+
+        # Clear cached reputation
+        self._r_rep = None
+
+        return reward, cos_sim, r_dir, r_mag, r_rep
+
+
+# Backward-compatible alias so existing imports still work
+SmoothnessRewardCalculator = CompositeRewardCalculator
+
+
+# ──────────────────── State Builder ──────────────────── #
+
+def build_state_vector(
+    score_cluster_1, dev_1, absolute_deviation_1, kurt_1,
+    score_cluster_2, dev_2, absolute_deviation_2, kurt_2,
+    cluster_1_indices, cluster_2_indices,
+    centroid_distance, ema_loss_trend, prev_alpha
+):
+    """
+    Construct the 12-dim state vector S_t.
+
+    Layout:
+        [0-3]   Cluster 1: norm_score, deviation, internal_sim, kurtosis
+        [4-7]   Cluster 2: norm_score, deviation, internal_sim, kurtosis
+        [8]     Cluster size ratio  |C1| / (|C1| + |C2|)
+        [9]     Centroid L2 distance
+        [10]    EMA loss trend
+        [11]    Previous alpha value (was prev_selected_cluster in DQN)
+    """
+    total_score = abs(score_cluster_1) + abs(score_cluster_2) + 1e-10
+    total_size = len(cluster_1_indices) + len(cluster_2_indices) + 1e-10
+
+    state = np.array([
+        score_cluster_1 / total_score,
+        dev_1,
+        absolute_deviation_1,
+        kurt_1,
+        score_cluster_2 / total_score,
+        dev_2,
+        absolute_deviation_2,
+        kurt_2,
+        len(cluster_1_indices) / total_size,
+        centroid_distance,
+        ema_loss_trend,
+        float(prev_alpha),
+    ], dtype=np.float32)
+
+    state = np.nan_to_num(state, nan=0.0, posinf=1.0, neginf=-1.0)
+    return state
