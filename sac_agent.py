@@ -511,7 +511,7 @@ def build_state_vector(
         [8]     Cluster size ratio  |C1| / (|C1| + |C2|)
         [9]     Centroid L2 distance
         [10]    EMA loss trend
-        [11]    Previous alpha value (was prev_selected_cluster in DQN)
+        [11]    Previous alpha value
     """
     total_score = abs(score_cluster_1) + abs(score_cluster_2) + 1e-10
     total_size = len(cluster_1_indices) + len(cluster_2_indices) + 1e-10

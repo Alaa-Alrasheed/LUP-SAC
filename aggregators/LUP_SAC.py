@@ -2,9 +2,9 @@
 # =============================================================================
 # LUP_SAC.py — LUP aggregator with SAC-based continuous cluster weighting.
 #
-# KEY DIFFERENCE FROM LUP_DQN.py:
+# KEY DIFFERENCES:
 #   • Stage 1 (MAD filtering): uses the ORIGINAL static heuristic
-#     (no RL intervention — this was a source of oscillation in DQN).
+#     (no RL intervention).
 #   • Stage 2 (AHC cluster selection): instead of binary pick-one,
 #     the SAC agent outputs α ∈ [0,1] and the global gradient is:
 #         G = α · NormClip(Mean(C₁)) + (1-α) · NormClip(Mean(C₂))

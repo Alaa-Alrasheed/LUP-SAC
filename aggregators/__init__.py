@@ -7,7 +7,6 @@ from .Bulyan import *
 from .signguard import *
 from .DnC import *
 from .LUP import *
-from .LUP_DQN import *
 from .LUP_SAC import *
 from .Clippedclustering import *
 from .Centeredclipping import * 
@@ -25,7 +24,6 @@ def aggregator(rule):
            'SignGuard-Sim': signguard_multiclass_plus1,
            'SignGuard-Dist': signguard_multiclass_plus2,
            'LUP': LUP,
-           'LUP_DQN': LUP_DQN,
            'LUP_SAC': LUP_SAC,
            "clipcluster": Clippedclustering,
            "centerclip":Centeredclipping

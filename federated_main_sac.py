@@ -1,13 +1,13 @@
 # =============================================================================
 # federated_main_sac.py — FL main loop with SAC agent + fixed byz tracking.
 #
-# FIXES FROM DQN VERSION:
+# SAC SPECIFIC UPDATES:
 #   1. Byz_Bypass_Rate: computed as actual count of byzantine indices in
 #      the selected set, NOT the hardcoded 0 from aggregate().
 #   2. Reward: Composite R_dir + R_mag + R_var (anti-hijacking hardened).
 #      R_dir=cosine similarity, R_mag=magnitude explosion penalty,
 #      R_var=internal cluster variance penalty.
-#   3. SAC continuous α ∈ [0,1] instead of discrete DQN {0, 1}.
+#   3. SAC continuous α ∈ [0,1].
 #
 # OUTPUT: 3 unified CSV files (all attacks in each, with Attack column)
 # =============================================================================
