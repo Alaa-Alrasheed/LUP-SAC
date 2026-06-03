@@ -1,12 +1,12 @@
 ﻿
-h5py==3.9.0
+h5py
 hdfs==2.7.3
-numpy==1.24.3
+numpy
 orjson==3.9.10
 QtPy
 scikit-image==0.22.0
 scikit-learn
-scipy==1.10.1
+scipy
 seaborn==0.13.0
 torchdata
 torchtext
