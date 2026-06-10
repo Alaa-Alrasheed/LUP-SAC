@@ -16,7 +16,7 @@ def args_parser():
                         help="the number of local iterations: E")
     parser.add_argument('--local_bs', type=int, default=256,
                         help="local batch size: b")
-    parser.add_argument('--lr', type=float, default=0.01,
+    parser.add_argument('--lr', type=float, default=0.001,
                         help='learning rate')
     parser.add_argument('--momentum', type=float, default=0.9,
                         help='SGD momentum')

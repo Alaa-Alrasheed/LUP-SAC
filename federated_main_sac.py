@@ -15,10 +15,11 @@
 import numpy as np
 import torch
 import torch.nn as nn
-from data_loader import get_dataset
-from running import benignWorker, byzantineWorker
+from datasets.mnist_loader import get_mnist_dataset
+from datasets.ton_iot_loader import get_ton_iot_dataset
+from clients.client_update import benignWorker, byzantineWorker, test_classification
 from models import CNN, ResNet18, CifarCNN, RNNClassifier, MLP
-from aggregators import aggregator
+from server.aggregation import LUP_SAC
 from attacks import attack
 from options import args_parser
 import tools
@@ -29,7 +30,8 @@ import os
 import pandas as pd
 from sklearn.metrics import precision_score, recall_score, f1_score
 
-from sac_agent import SACAgent, CompositeRewardCalculator
+from agents.sac_agent import SACAgent
+from agents.fl_env import CompositeRewardCalculator
 
 torch.manual_seed(0)
 np.random.seed(0)
@@ -127,16 +129,16 @@ def print_attack_summary(attack_name, rows):
                 'Reward', 'Benign_Selection_Rate', 'Byz_Bypass_Rate']:
         df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    print(f'\n{"─"*60}')
+    print(f'\n{"-"*60}')
     print(f'  Summary for attack: {attack_name}')
-    print(f'{"─"*60}')
+    print(f'{"-"*60}')
     print(f'  Final Accuracy:     {df["Test_Accuracy"].iloc[-1]:.2f}%')
     print(f'  Best  Accuracy:     {df["Test_Accuracy"].max():.2f}%  '
           f'(epoch {df["Test_Accuracy"].idxmax() + 1})')
     print(f'  Avg Byz Bypass:     {df["Byz_Bypass_Rate"].mean():.4f}')
     print(f'  Avg Reward:         {df["Reward"].mean():.6f}')
     print(f'  Avg Critic Loss:    {df["Critic_Loss"].mean():.6f}')
-    print(f'{"─"*60}')
+    print(f'{"-"*60}')
 
 
 # ========================= Training Function ========================= #
@@ -188,7 +190,7 @@ def train_one_round(args, train_loader, global_model, epoch,
 
     for idx in idx_users[num_byzs:]:
         grad, loss, user_grad_org, model = benignWorker(
-            model_copies[idx], opt[idx], train_loader[idx], device, args, idx)
+            model_copies[idx], opt[idx], train_loader[idx], args, idx)
         benign_grads.append(grad.clone().detach())
         local_losses.append(loss)
         user_grad_org_all.append(user_grad_org)
@@ -255,7 +257,7 @@ def train_one_round(args, train_loader, global_model, epoch,
     print(
         f'[epoch {epoch+1}, {100*(epoch+1)/args.epochs:.2f}%] '
         f'loss: {loss_avg:.5f} --- '
-        f'\u03b1: {alpha_val:.4f} --- '
+        f'alpha: {alpha_val:.4f} --- '
         f'critic_loss: {sac_losses["critic_loss"]:.6f} --- '
         f'entropy_coeff: {sac_losses["alpha"]:.4f}')
 
@@ -281,7 +283,10 @@ if __name__ == '__main__':
             "cuda" if torch.cuda.is_available() else "cpu")
         device = args.device
 
-        train_loader, test_loader = get_dataset(args)
+        if args.dataset == 'ton_iot':
+            train_loader, test_loader = get_ton_iot_dataset(args)
+        else:
+            train_loader, test_loader = get_mnist_dataset(args)
 
         all_logger, paper_logger, sac_logger = create_loggers(
             args.dataset, gar_name, args.skew)
@@ -320,7 +325,7 @@ if __name__ == '__main__':
 
             criterion = nn.CrossEntropyLoss()
             Attack_fn = attack(attack_name)
-            GAR = aggregator(gar_name)()
+            GAR = LUP_SAC()
 
             # Fresh SAC agent per attack
             sac_agent = SACAgent(
@@ -415,7 +420,7 @@ if __name__ == '__main__':
             ckpt_path = (f"sac_ckpt_{args.dataset}_{attack_name}"
                          f"_{args.num_byzs}_{gar_name}.pt")
             sac_agent.save(ckpt_path)
-            print(f"  [\u2713] SAC checkpoint saved to {ckpt_path}")
+            print(f"  [v] SAC checkpoint saved to {ckpt_path}")
 
         print(f"\n{'='*60}")
         print(f"  ALL EXPERIMENTS COMPLETE")

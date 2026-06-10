@@ -3,7 +3,6 @@
 import math
 import torch
 import tools
-from aggregators import aggregator
 # ---------------------------------------------------------------------------- #
 
 def adaptive_attack_std(byz_grads, benign_grads, agg_rule, g0=None, *args, **kwargs):

@@ -32,21 +32,38 @@ python federated_main_sac.py --dataset ton_iot --attack label_flip sign_flip byz
 
 ---
 
-## Replication Commands
+## Paper Replication Guide (DT-BFL)
 
-Run the following commands in your shell from the root directory of the workspace to replicate the exact experiment parameters specified in the original paper directly within our RL framework:
+This repository is pre-configured to replicate the exact results from the **DT-BFL** paper ([DT-BFL: Digital Twins for Blockchain-enabled Federated Learning in Internet of Things networks](../DT-BFL.pdf)). 
 
-### A. Replicating ToN-IoT Experiments
-Runs 100 rounds with 50 clients, 25 Byzantine nodes, a learning rate of `0.001`, and batch size of `256`:
+The default hyperparameter values in `options.py` are strictly matched to the paper's "Table 3" configuration:
+- **Total Clients ($M$)**: `50`
+- **Percentage of compromised devices ($F$)**: `50%` (25 Byzantines)
+- **Learning Rate ($\eta$)**: `0.001`
+- **Global Rounds ($R$)**: `100`
+- **Non-IID Skew ($S$)**: `50%`
+- **Local Epochs ($E$)**: `1`
+- **Default Attacks**: Runs all 9 attacks consecutively.
+
+### How to Run
+
+To replicate the paper's experiments, you only need to specify the dataset (and adjust the local batch size to `128` specifically for MNIST as done in the paper):
+
+**A. MNIST Dataset (Batch Size: 128)**
 ```bash
-python federated_main_sac.py --dataset ton_iot --lr 0.001
+python federated_main_sac.py --dataset mnist --local_bs 128
 ```
 
-### B. Replicating MNIST Experiments
-Runs 100 rounds with 50 clients, 25 Byzantine nodes, a learning rate of `0.001`, and batch size of `128` (as specified on Page 9 of the paper):
+**B. ToN-IoT Dataset (Batch Size: 256)**
 ```bash
-python federated_main_sac.py --dataset mnist --lr 0.001 --local_bs 128
+python federated_main_sac.py --dataset ton_iot
 ```
+
+**C. CIFAR-10 Dataset (Batch Size: 256)**
+```bash
+python federated_main_sac.py --dataset cifar
+```
+> **Note on CIFAR-10 Models**: By default, CIFAR-10 runs with the standard `CifarCNN` model. The paper also evaluated `DenseNet121` and `ResNet-9`. To use those, you will need to manually instantiate them in `federated_main_sac.py` instead of `CifarCNN`.
 
 ---
 
