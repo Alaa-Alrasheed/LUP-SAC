@@ -91,13 +91,14 @@ class LUP_SAC(object):
 
     def aggregate(self, grads_original, user_grad_org_all, previous_grads,
                   score_matrix_client, f=10, epoch=1, g0=None, iteration=1,
-                  sac_agent=None, reward_calc=None, **kwargs):
+                  sac_agent=None, reward_calc=None, semantic_analyzer=None, **kwargs):
         """
         Parameters
         ----------
-        sac_agent   : SACAgent instance.  If None, falls back to original
-                      static heuristic.
-        reward_calc : SmoothnessRewardCalculator instance.
+        sac_agent         : SACAgent instance.  If None, falls back to original
+                            static heuristic.
+        reward_calc       : SmoothnessRewardCalculator instance.
+        semantic_analyzer : SemanticDataDefense instance (if --semantic is True)
         """
 
         grads_original_copy = grads_original
@@ -150,6 +151,29 @@ class LUP_SAC(object):
             filtered_indices_list = filtered_indices[0].tolist()
             filtered_indices_list_other = list(
                 set(range(num_clients)) - set(filtered_indices_list))
+
+            # ================================================================
+            # ============  SEMANTIC ANALYSIS (IF ENABLED)  ==================
+            # ================================================================
+            per_client_semantic_scores = {}
+            if semantic_analyzer is not None:
+                # We only need to analyze clients that passed MAD filtering
+                # (or we could analyze all of them; for efficiency, we analyze all
+                # clients because AHC uses them all later).
+                # Flattened gradients:
+                client_grads_flattened = []
+                for i in range(num_clients):
+                    client_grads_flattened.append(grads_original[i].cpu().numpy().flatten())
+                
+                # To interface with semantic_analyzer, we need torch tensors.
+                client_grads_tensors = [torch.tensor(g, dtype=torch.float32) for g in client_grads_flattened]
+                client_indices_list = list(range(num_clients))
+                
+                per_client_semantic_scores = semantic_analyzer.analyze(
+                    client_grads=client_grads_tensors,
+                    client_indices=client_indices_list,
+                    global_model=semantic_analyzer._global_model  # passed in main
+                )
 
             # ================================================================
             # ==  STAGE 1: ORIGINAL STATIC HEURISTIC (no RL here)  ===========
@@ -324,6 +348,24 @@ class LUP_SAC(object):
             score_cluster_1 = np.sum(score_matrix_client[cluster_1_indices])
             score_cluster_2 = np.sum(score_matrix_client[cluster_2_indices])
 
+            # ── Aggregate Semantic Scores (if enabled) ──
+            s_c1_cl = s_c1_cg = s_c2_cl = s_c2_cg = None
+            if semantic_analyzer is not None:
+                s_c1_cl, s_c1_cg = semantic_analyzer.aggregate_cluster_scores(
+                    per_client_semantic_scores, cluster_1_indices
+                )
+                s_c2_cl, s_c2_cg = semantic_analyzer.aggregate_cluster_scores(
+                    per_client_semantic_scores, cluster_2_indices
+                )
+                
+                # Register with reward calculator for R_dist
+                if reward_calc is not None:
+                    # We register both, but we don't know which is "selected" yet
+                    # The reward_calc uses this when computing reward.
+                    # We will register them such that the one with higher SAC weight
+                    # will be the 'selected' one. We do this *after* SAC selection.
+                    pass
+
             absolute_deviation_1 = np.mean(grads_sim[cluster_1_indices])
             absolute_deviation_2 = np.mean(grads_sim[cluster_2_indices]) \
                 if len(cluster_2_indices) > 0 else 0.0
@@ -372,6 +414,8 @@ class LUP_SAC(object):
                     centroid_distance=centroid_dist,
                     ema_loss_trend=ema_trend,
                     prev_alpha=self._prev_alpha,
+                    s_c1_cl=s_c1_cl, s_c1_cg=s_c1_cg,
+                    s_c2_cl=s_c2_cl, s_c2_cg=s_c2_cg,
                 )
 
                 alpha_val = sac_agent.select_action(state_s2)
@@ -431,6 +475,18 @@ class LUP_SAC(object):
                     max_rs = np.max(score_matrix_client)
                     r_rep = float(mean_rs / (max_rs + 1e-5))
                     reward_calc.register_reputation(r_rep)
+                    
+                # -- Register Semantic Scores for R_dist computation --
+                if semantic_analyzer is not None:
+                    # alpha_val > 0.5 means C1 is more highly weighted
+                    if alpha_val >= 0.5:
+                        s_sel_cg = s_c1_cg
+                        s_rej_cg = s_c2_cg
+                    else:
+                        s_sel_cg = s_c2_cg
+                        s_rej_cg = s_c1_cg
+                    
+                    reward_calc.register_semantic_scores(s_sel_cg, s_rej_cg)
 
             # -- All indices contribute (for score tracking) --
             all_participating = list(set(cluster_1_indices + cluster_2_indices))

@@ -352,27 +352,48 @@ class SACAgent:
 
 # ──────────────────── State Builder ──────────────────── #
 
+# Cache for computing temporal drift (ΔS) between rounds
+_prev_semantic_state: dict = {'s_c1_cl': 0.5, 's_c1_cg': 0.5,
+                               's_c2_cl': 0.5, 's_c2_cg': 0.5}
+
+
 def build_state_vector(
     score_cluster_1, dev_1, absolute_deviation_1, kurt_1,
     score_cluster_2, dev_2, absolute_deviation_2, kurt_2,
     cluster_1_indices, cluster_2_indices,
-    centroid_distance, ema_loss_trend, prev_alpha
+    centroid_distance, ema_loss_trend, prev_alpha,
+    # ── Semantic features (optional — None when semantic disabled) ──
+    s_c1_cl=None, s_c1_cg=None,
+    s_c2_cl=None, s_c2_cg=None,
 ):
     """
-    Construct the 12-dim state vector S_t.
+    Construct the state vector S_t.
 
-    Layout:
-        [0-3]   Cluster 1: norm_score, deviation, internal_sim, kurtosis
-        [4-7]   Cluster 2: norm_score, deviation, internal_sim, kurtosis
+    When semantic features are provided (not None), produces a 20-dim vector.
+    When semantic features are None, produces the original 12-dim vector.
+
+    Layout (20-dim):
+        [0-3]   Cluster 1 geometric: norm_score, deviation, internal_sim, kurtosis
+        [4-7]   Cluster 2 geometric: norm_score, deviation, internal_sim, kurtosis
         [8]     Cluster size ratio  |C1| / (|C1| + |C2|)
         [9]     Centroid L2 distance
         [10]    EMA loss trend
-        [11]    Previous alpha value (was prev_selected_cluster in DQN)
+        [11]    Previous alpha value
+        [12]    S_C1_cl:  Mean intra-client temporal MMD for Cluster 1
+        [13]    S_C1_cg:  Mean client-vs-global MMD for Cluster 1
+        [14]    S_C2_cl:  Mean intra-client temporal MMD for Cluster 2
+        [15]    S_C2_cg:  Mean client-vs-global MMD for Cluster 2
+        [16]    ΔS_C1_cl: Temporal drift of S_C1_cl (current - previous round)
+        [17]    ΔS_C1_cg: Temporal drift of S_C1_cg
+        [18]    ΔS_C2_cl: Temporal drift of S_C2_cl
+        [19]    ΔS_C2_cg: Temporal drift of S_C2_cg
     """
+    global _prev_semantic_state
+
     total_score = abs(score_cluster_1) + abs(score_cluster_2) + 1e-10
     total_size = len(cluster_1_indices) + len(cluster_2_indices) + 1e-10
 
-    state = np.array([
+    geometric = [
         score_cluster_1 / total_score,
         dev_1,
         absolute_deviation_1,
@@ -385,7 +406,32 @@ def build_state_vector(
         centroid_distance,
         ema_loss_trend,
         float(prev_alpha),
-    ], dtype=np.float32)
+    ]
+
+    if s_c1_cl is not None:
+        # Semantic features provided — build 20-dim state
+        semantic_current = [s_c1_cl, s_c1_cg, s_c2_cl, s_c2_cg]
+
+        # Temporal drift: ΔS = S(t) - S(t-1)
+        delta_s = [
+            s_c1_cl - _prev_semantic_state['s_c1_cl'],
+            s_c1_cg - _prev_semantic_state['s_c1_cg'],
+            s_c2_cl - _prev_semantic_state['s_c2_cl'],
+            s_c2_cg - _prev_semantic_state['s_c2_cg'],
+        ]
+
+        # Update cache for next round
+        _prev_semantic_state = {
+            's_c1_cl': s_c1_cl, 's_c1_cg': s_c1_cg,
+            's_c2_cl': s_c2_cl, 's_c2_cg': s_c2_cg,
+        }
+
+        state = np.array(
+            geometric + semantic_current + delta_s, dtype=np.float32
+        )
+    else:
+        # Semantic disabled — original 12-dim state
+        state = np.array(geometric, dtype=np.float32)
 
     state = np.nan_to_num(state, nan=0.0, posinf=1.0, neginf=-1.0)
     return state

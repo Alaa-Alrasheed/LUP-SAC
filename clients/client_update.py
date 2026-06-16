@@ -45,7 +45,9 @@ def byzantineWorker(model, optimizer, train_loader, args, idx):
     user_grad, user_grad_org = tools.get_gradient_values(model)
     return user_grad, loss.item(), user_grad_org, model
 
-def test_classification(epoch, device, model, test_loader, loss_fn, run_time, output_csv="results.csv"):
+import os
+
+def test_classification(epoch, device, model, test_loader, loss_fn, run_time, output_csv=os.path.join("results", "results.csv")):
     model.eval()
     correct = 0
     total = len(test_loader.dataset)

@@ -32,6 +32,7 @@ from sklearn.metrics import precision_score, recall_score, f1_score
 
 from agents.sac_agent import SACAgent
 from agents.fl_env import CompositeRewardCalculator
+from server.semantic_analyzer import SemanticDataDefense
 
 torch.manual_seed(0)
 np.random.seed(0)
@@ -87,6 +88,7 @@ class CSVLogger:
 
 
 def create_loggers(dataset, gar_name, skew):
+    os.makedirs('results', exist_ok=True)
     suffix = f"{dataset}_{gar_name}_{skew}"
 
     all_cols = [
@@ -94,10 +96,10 @@ def create_loggers(dataset, gar_name, skew):
         'Train_Loss', 'Test_Accuracy', 'Precision', 'Recall', 'F1_Score', 'Test_Loss',
         'Byz_Bypass_Count', 'Byz_Bypass_Rate', 'Benign_Selection_Rate', 'Num_Selected',
         'Alpha', 'Critic_Loss', 'Actor_Loss', 'Entropy_Coeff',
-        'Reward', 'Cosine_Sim', 'R_dir', 'R_mag', 'R_rep',
+        'Reward', 'Cosine_Sim', 'R_dir', 'R_mag', 'R_rep', 'R_dist', 'Veto_Triggered',
         'Aggregation_Time_s',
     ]
-    all_logger = CSVLogger(f"all_results_{suffix}.csv", all_cols)
+    all_logger = CSVLogger(os.path.join('results', f"all_results_{suffix}.csv"), all_cols)
     all_logger.write_header()
 
     paper_cols = [
@@ -106,16 +108,16 @@ def create_loggers(dataset, gar_name, skew):
         'Byz_Bypass_Count', 'Byz_Bypass_Rate', 'Benign_Selection_Rate', 'Num_Selected',
         'Aggregation_Time_s',
     ]
-    paper_logger = CSVLogger(f"paper_results_{suffix}.csv", paper_cols)
+    paper_logger = CSVLogger(os.path.join('results', f"paper_results_{suffix}.csv"), paper_cols)
     paper_logger.write_header()
 
     sac_cols = [
         'Attack', 'Epoch',
         'Alpha', 'Critic_Loss', 'Actor_Loss', 'Entropy_Coeff',
-        'Reward', 'Cosine_Sim', 'R_dir', 'R_mag', 'R_rep',
+        'Reward', 'Cosine_Sim', 'R_dir', 'R_mag', 'R_rep', 'R_dist', 'Veto_Triggered',
         'Replay_Buffer_Size',
     ]
-    sac_logger = CSVLogger(f"sac_results_{suffix}.csv", sac_cols)
+    sac_logger = CSVLogger(os.path.join('results', f"sac_results_{suffix}.csv"), sac_cols)
     sac_logger.write_header()
 
     return all_logger, paper_logger, sac_logger
@@ -144,7 +146,7 @@ def print_attack_summary(attack_name, rows):
 # ========================= Training Function ========================= #
 
 def train_one_round(args, train_loader, global_model, epoch,
-                    Attack, GAR, sac_agent, reward_calc,
+                    Attack, GAR, sac_agent, reward_calc, semantic_analyzer,
                     previous_iteration_grads_epoch,
                     score_matrix_client,
                     prev_global_grad_np):
@@ -215,14 +217,17 @@ def train_one_round(args, train_loader, global_model, epoch,
     r_dir = 0.0
     r_mag = 0.0
     r_rep = 0.0
+    r_dist = 0.0
+    veto_triggered = False
 
     if sac_agent.has_pending() and epoch > 0 and prev_global_grad_np is not None:
-        reward, cos_sim, r_dir, r_mag, r_rep = reward_calc.compute_reward(prev_global_grad_np)
+        reward, cos_sim, r_dir, r_mag, r_rep, r_dist, veto_triggered = reward_calc.compute_reward(prev_global_grad_np, args)
 
         # Build next_state (a rough approximation — the real state
         # comes from the aggregation below, but we need something
         # to close the previous transition)
-        dummy_next = np.zeros(12, dtype=np.float32)
+        state_dim = 20 if semantic_analyzer is not None else 12
+        dummy_next = np.zeros(state_dim, dtype=np.float32)
         done = (epoch >= args.epochs - 1)
         sac_agent.complete_pending(reward, dummy_next, done)
 
@@ -235,6 +240,7 @@ def train_one_round(args, train_loader, global_model, epoch,
         score_matrix_client,
         f=num_byzs, epoch=epoch, g0='grad_0', iteration=0,
         sac_agent=sac_agent, reward_calc=reward_calc,
+        semantic_analyzer=semantic_analyzer,
     )
     end_time = time.time()
     running_time = end_time - start_time
@@ -263,7 +269,7 @@ def train_one_round(args, train_loader, global_model, epoch,
 
     return ([loss_avg], previous_iteration_grads_it, running_time,
             num_benign, selected_idx, alpha_val,
-            sac_losses, reward, cos_sim, r_dir, r_mag, r_rep,
+            sac_losses, reward, cos_sim, r_dir, r_mag, r_rep, r_dist, veto_triggered,
             new_global_grad_np)
 
 
@@ -327,9 +333,24 @@ if __name__ == '__main__':
             Attack_fn = attack(attack_name)
             GAR = LUP_SAC()
 
+            # Instantiate Semantic Analyzer if enabled
+            semantic_analyzer = None
+            if args.semantic:
+                semantic_analyzer = SemanticDataDefense(
+                    dataset=args.dataset,
+                    global_model=global_model,
+                    device=device,
+                    gi_iterations=args.gi_iterations,
+                    gi_batch_size=args.gi_batch_size,
+                    sample_ratio=args.semantic_sample_ratio,
+                    decay_factor=args.semantic_decay,
+                    train_loader=train_loader[0] if train_loader else None,
+                )
+
             # Fresh SAC agent per attack
+            sac_state_dim = 20 if args.semantic else 12
             sac_agent = SACAgent(
-                state_dim=12, hidden_dim=64,
+                state_dim=sac_state_dim, hidden_dim=64,
                 lr_actor=3e-4, lr_critic=3e-4, lr_alpha=3e-4,
                 gamma=0.99, tau=0.005,
                 buffer_size=10_000, batch_size=64,
@@ -340,6 +361,7 @@ if __name__ == '__main__':
                 ema_alpha=0.1,
                 mag_threshold_factor=2.0,
                 mag_penalty=-1.0,
+                lambda_dist=0.3,
             )
 
             # Book-keeping
@@ -354,10 +376,10 @@ if __name__ == '__main__':
             for epoch in range(args.epochs):
                 (loss, previous_iteration_grads_epoch, running_time,
                  num_benign, selected_idx, alpha_val,
-                 sac_losses, reward, cos_sim, r_dir, r_mag, r_rep,
+                 sac_losses, reward, cos_sim, r_dir, r_mag, r_rep, r_dist, veto_triggered,
                  prev_global_grad_np) = train_one_round(
                     args, train_loader, global_model, epoch,
-                    Attack_fn, GAR, sac_agent, reward_calc,
+                    Attack_fn, GAR, sac_agent, reward_calc, semantic_analyzer,
                     previous_iteration_grads_epoch,
                     score_matrix_client,
                     prev_global_grad_np)
@@ -406,6 +428,8 @@ if __name__ == '__main__':
                     'R_dir': f'{r_dir:.6f}',
                     'R_mag': f'{r_mag:.6f}',
                     'R_rep': f'{r_rep:.6f}',
+                    'R_dist': f'{r_dist:.6f}',
+                    'Veto_Triggered': str(veto_triggered),
                     'Aggregation_Time_s': f'{running_time:.4f}',
                     'Replay_Buffer_Size': len(sac_agent.memory),
                 }
@@ -417,8 +441,8 @@ if __name__ == '__main__':
 
             print_attack_summary(attack_name, attack_rows)
 
-            ckpt_path = (f"sac_ckpt_{args.dataset}_{attack_name}"
-                         f"_{args.num_byzs}_{gar_name}.pt")
+            os.makedirs('checkpoints', exist_ok=True)
+            ckpt_path = os.path.join('checkpoints', f"sac_ckpt_{args.dataset}_{attack_name}_{args.num_byzs}_{gar_name}.pt")
             sac_agent.save(ckpt_path)
             print(f"  [v] SAC checkpoint saved to {ckpt_path}")
 

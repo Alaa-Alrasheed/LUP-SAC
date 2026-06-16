@@ -7,7 +7,7 @@ class CompositeRewardCalculator:
     """
     Hardened composite reward to prevent EMA momentum hijacking.
 
-    R_t = R_dir + R_mag + R_rep
+    R_t = R_dir + R_mag + R_rep + R_dist
 
     Components
     ----------
@@ -24,7 +24,13 @@ class CompositeRewardCalculator:
         Mean(RS_selected_clients) / (Max(RS_all_clients) + 1e-5).
         Replaces R_var to defeat ByzMean's geometric cloaking.
 
-    Total reward bounded roughly in [-1.0, +2.0].
+    R_dist (Distribution Alignment):
+        λ_dist × (S_selected_cg - S_rejected_cg).
+        Rewards selecting the cluster with better global semantic alignment.
+        Range: [-λ_dist, +λ_dist].
+        When semantic analysis is disabled, R_dist = 0.0.
+
+    Total reward bounded roughly in [-2.0, +2.3].
 
     The EMA uses a slow decay (α=0.1 by default) so attackers cannot
     corrupt the reference direction within a few rounds.
@@ -32,7 +38,8 @@ class CompositeRewardCalculator:
 
     def __init__(self, ema_alpha: float = 0.1,
                  mag_threshold_factor: float = 2.0,
-                 mag_penalty: float = -1.0):
+                 mag_penalty: float = -1.0,
+                 lambda_dist: float = 0.3):
         """
         Parameters
         ----------
@@ -44,16 +51,21 @@ class CompositeRewardCalculator:
             If ||G||₂ > factor × ||EMA||₂, fire R_mag penalty.
         mag_penalty : float
             Flat penalty value when magnitude gate fires.
+        lambda_dist : float
+            Scaling factor for R_dist.  Kept small (0.3) to avoid
+            overwhelming the directional signal.
         """
         self.ema_alpha = ema_alpha
         self.mag_threshold_factor = mag_threshold_factor
         self.mag_penalty = mag_penalty
+        self.lambda_dist = lambda_dist
 
         self._ema_grad = None
         self._loss_history = []
         
-        # Cached per-round: set by register_reputation() before compute_reward()
+        # Cached per-round: set by register_*() before compute_reward()
         self._r_rep = None
+        self._r_dist_raw = None  # Raw (S_selected_cg - S_rejected_cg)
 
     # ── Loss tracking (kept for state builder compatibility) ──
 
@@ -77,7 +89,7 @@ class CompositeRewardCalculator:
             self._ema_grad = (self.ema_alpha * global_grad
                               + (1.0 - self.ema_alpha) * self._ema_grad)
 
-    # ── Per-round reputation registration ──
+    # ── Per-round reputation / semantic registration ──
 
     def register_reputation(self, r_rep: float):
         """
@@ -85,25 +97,48 @@ class CompositeRewardCalculator:
         """
         self._r_rep = r_rep
 
+    def register_semantic_scores(
+        self, s_selected_cg: float, s_rejected_cg: float
+    ):
+        """
+        Register per-round semantic distribution alignment scores.
+
+        Called from aggregation.py after cluster-level semantic scoring.
+        When semantic analysis is disabled, this is never called and
+        R_dist defaults to 0.0.
+
+        Parameters
+        ----------
+        s_selected_cg : float
+            Mean MMD (client vs global) for the higher-weighted cluster.
+        s_rejected_cg : float
+            Mean MMD (client vs global) for the lower-weighted cluster.
+        """
+        self._r_dist_raw = s_selected_cg - s_rejected_cg
+
     # ── Reward computation ──
 
-    def compute_reward(self, global_grad):
+    def compute_reward(self, global_grad, args=None):
         """
-        R_t = R_dir + R_mag + R_rep
+        R_t = R_dir + R_mag + R_rep + R_dist
 
         Parameters
         ----------
         global_grad : np.ndarray
             Flattened global gradient from current round.
+        args : argparse.Namespace
+            Parsed command-line arguments (includes semantic veto configuration).
 
         Returns
         -------
-        (reward, cos_sim, r_dir, r_mag, r_rep) : tuple
-            reward  — composite reward (float)
-            cos_sim — raw cosine similarity for logging (float)
-            r_dir   — directional reward component (float)
-            r_mag   — magnitude penalty component (float)
-            r_rep   — reputation anchor component (float)
+        (reward, cos_sim, r_dir, r_mag, r_rep, r_dist, veto_triggered) : tuple
+            reward         — composite reward (float)
+            cos_sim        — raw cosine similarity for logging (float)
+            r_dir          — directional reward component (float)
+            r_mag          — magnitude penalty component (float)
+            r_rep          — reputation anchor component (float)
+            r_dist         — distribution alignment component (float)
+            veto_triggered — boolean if semantic veto was triggered
         """
         # ─── R_dir: Directional momentum ───
         if self._ema_grad is None:
@@ -126,13 +161,27 @@ class CompositeRewardCalculator:
         # ─── R_rep: Reputation Anchor ───
         r_rep = self._r_rep if self._r_rep is not None else 0.0
 
+        # ─── R_dist: Distribution Alignment ───
+        if self._r_dist_raw is not None:
+            r_dist = self.lambda_dist * self._r_dist_raw
+        else:
+            r_dist = 0.0
+
         # ─── Composite reward ───
-        reward = r_dir + r_mag + r_rep
+        veto_triggered = False
+        if args is not None and getattr(args, 'semantic', False) and r_dist < getattr(args, 'semantic_veto_threshold', -0.03):
+            # The semantic distribution is heavily corrupted. Override all geometric trust.
+            reward = getattr(args, 'semantic_penalty_value', -1.0)
+            veto_triggered = True
+        else:
+            # Normal operation
+            reward = r_dir + r_mag + r_rep + r_dist
 
-        # Clear cached reputation
+        # Clear cached round-specific values
         self._r_rep = None
+        self._r_dist_raw = None
 
-        return reward, cos_sim, r_dir, r_mag, r_rep
+        return reward, cos_sim, r_dir, r_mag, r_rep, r_dist, veto_triggered
 
 
 # Backward-compatible alias so existing imports still work

@@ -40,5 +40,26 @@ def args_parser():
     parser.add_argument('--skew', type=float, default=0.5,
                         help='Default set to IID. Set to 0 for non-IID.')
     # parser.add_argument('--seed', type=int, default=1, help='random seed')
+
+    # ── Semantic Distribution Analysis ──
+    parser.add_argument('--semantic', action='store_true', default=True,
+                        help='Enable semantic distribution analysis (default: True)')
+    parser.add_argument('--no-semantic', dest='semantic', action='store_false',
+                        help='Disable semantic analysis (zero overhead short-circuit)')
+    parser.add_argument('--gi_iterations', type=int, default=-1,
+                        help='Gradient inversion iterations. -1 = auto-scale by device '
+                             '(GPU: 30, CPU: 15)')
+    parser.add_argument('--gi_batch_size', type=int, default=8,
+                        help='Dummy batch size for gradient inversion')
+    parser.add_argument('--semantic_sample_ratio', type=float, default=0.3,
+                        help='Fraction of clients analyzed per round (0.3 = 30%%)')
+    parser.add_argument('--semantic_decay', type=float, default=0.9,
+                        help='Temporal decay factor for unsampled client scores')
+    
+    parser.add_argument('--semantic_veto_threshold', type=float, default=-0.015,
+                        help='The MMD penalty threshold that triggers a hard reward override.')
+    parser.add_argument('--semantic_penalty_value', type=float, default=-1.0,
+                        help='The hard negative reward applied when the veto fires.')
+
     args = parser.parse_args()
     return args
