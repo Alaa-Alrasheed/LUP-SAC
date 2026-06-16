@@ -116,3 +116,12 @@ The framework is highly customizable. Below are the available command-line argum
 * `--skew` (float): Data skewness parameter for non-IID settings. (Default: `0.5`)
 * `--optimizer` (str): Type of local optimizer to use. (Default: `sgd`)
 * `--device` (str): Compute device. Set to `cuda:0` for GPU or `cpu`. (Default: `cpu`)
+
+### Semantic Data Defense & Veto Parameters
+* `--semantic` / `--no-semantic`: Enable or disable the Semantic Distribution Defense module via Gradient Inversion. (Default: `True`)
+* `--semantic_veto_threshold` (float): The MMD penalty threshold that triggers a hard reward override (Semantic Veto). (Default: `-0.015`)
+* `--semantic_penalty_value` (float): The hard negative reward applied when the semantic veto fires. (Default: `-1.0`)
+* `--semantic_sample_ratio` (float): Fraction of clients analyzed via Gradient Inversion per round. (Default: `0.3`)
+* `--semantic_decay` (float): Temporal decay factor for unsampled client semantic scores. (Default: `0.9`)
+* `--gi_iterations` (int): Max gradient inversion optimization steps. Set to `-1` for auto-scaling. (Default: `-1`)
+* `--gi_batch_size` (int): Dummy batch size used for gradient inversion. (Default: `8`)
