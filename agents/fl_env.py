@@ -116,6 +116,102 @@ class CompositeRewardCalculator:
         """
         self._r_dist_raw = s_selected_cg - s_rejected_cg
 
+    # ── Synchronous pre-aggregation safety gate ──
+
+    def evaluate_synchronous_gate(
+        self, s_c1_cg, s_c2_cg,
+        c1_dir_score, c2_dir_score,
+        c1_mag_ratio, c2_mag_ratio,
+        proposed_alpha, prev_alpha, args
+    ):
+        """Synchronous pre-aggregation check covering three risk signals:
+        semantic (MMD), directional (cosine vs EMA), and magnitude (norm ratio).
+
+        Parameters
+        ----------
+        s_c1_cg, s_c2_cg : float
+            Mean MMD (client vs global) for clusters 1 and 2.
+        c1_dir_score, c2_dir_score : float
+            Cosine similarity of each cluster mean to the EMA gradient.
+        c1_mag_ratio, c2_mag_ratio : float
+            ||cluster_mean|| / ||EMA_grad|| for each cluster.
+        proposed_alpha : float
+            The alpha value proposed by SAC (or heuristic) before gating.
+        prev_alpha : float
+            Previous round's alpha, used as fallback if both clusters fail.
+        args : argparse.Namespace
+            Parsed command-line arguments.
+
+        Returns
+        -------
+        (gated_alpha, r_dist_prospective, gate_info) : tuple
+            gated_alpha        — alpha after gate enforcement (float)
+            r_dist_prospective — prospective R_dist for this round (float)
+            gate_info          — dict with per-check booleans and composite 'fired'
+        """
+        gate_info = {
+            'fired': False,
+            'semantic': False,
+            'direction': False,
+            'magnitude': False,
+            'dir_gap': 0.0,
+        }
+
+        # Identify selected / rejected clusters based on proposed alpha
+        if proposed_alpha >= 0.5:
+            s_sel, s_rej = s_c1_cg, s_c2_cg
+            dir_sel, dir_rej = c1_dir_score, c2_dir_score
+            mag_sel, mag_rej = c1_mag_ratio, c2_mag_ratio
+        else:
+            s_sel, s_rej = s_c2_cg, s_c1_cg
+            dir_sel, dir_rej = c2_dir_score, c1_dir_score
+            mag_sel, mag_rej = c2_mag_ratio, c1_mag_ratio
+
+        # ── Relative direction diagnostic (selected - rejected) ──
+        dir_gap = dir_sel - dir_rej
+        gate_info['dir_gap'] = dir_gap
+
+        # ── Semantic check (R_dist prospective) ──
+        r_dist_prospective = self.lambda_dist * (s_sel - s_rej)
+        gated_alpha = proposed_alpha
+
+        if args is None or not getattr(args, 'semantic', False):
+            return gated_alpha, r_dist_prospective, gate_info
+
+        semantic_thresh = getattr(args, 'semantic_veto_threshold', -0.03)
+        dir_thresh = getattr(args, 'direction_veto_threshold', 0.0)
+        mag_thresh = getattr(args, 'mag_veto_factor', 2.0)
+
+        # Check selected cluster for failures
+        sel_sem_fail = (r_dist_prospective < semantic_thresh)
+        sel_dir_fail = (dir_sel < dir_thresh)
+        sel_mag_fail = (mag_sel > mag_thresh)
+
+        # Check rejected cluster for failures (compute its prospective R_dist
+        # as if IT were selected — mirror the formula)
+        r_dist_other = self.lambda_dist * (s_rej - s_sel)
+        rej_sem_fail = (r_dist_other < semantic_thresh)
+
+        # Always record which checks WOULD fire (for calibration logging)
+        gate_info['semantic'] = sel_sem_fail
+        gate_info['direction'] = sel_dir_fail
+        gate_info['magnitude'] = sel_mag_fail
+
+        # ── ENFORCEMENT: only the semantic check can override alpha ──
+        # Direction and magnitude are logging-only until thresholds are
+        # calibrated from real per-attack distributions.
+        if sel_sem_fail:
+            if not rej_sem_fail:
+                # Other cluster is semantically clean — flip to it
+                gate_info['fired'] = True
+                gated_alpha = 0.0 if proposed_alpha >= 0.5 else 1.0
+            else:
+                # Both clusters semantically suspicious — fall back
+                gate_info['fired'] = True
+                gated_alpha = prev_alpha
+
+        return gated_alpha, r_dist_prospective, gate_info
+
     # ── Reward computation ──
 
     def compute_reward(self, global_grad, args=None):

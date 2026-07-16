@@ -34,6 +34,7 @@
 from __future__ import annotations
 
 import copy
+import os
 import random
 import time
 from collections import defaultdict
@@ -380,17 +381,15 @@ class _ImageFeatureExtractor(nn.Module):
     def __init__(self, input_channels: int = 1, num_classes: int = 10):
         super().__init__()
         self.features = nn.Sequential(
-            nn.Conv2d(input_channels, 16, kernel_size=5, padding=2),
-            nn.ReLU(),
-            nn.MaxPool2d(2, 2),
-            nn.Conv2d(16, 32, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2, 2),
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Conv2d(input_channels, 16, kernel_size=5), # features.0
+            nn.ReLU(),                       # features.1
+            nn.MaxPool2d(2),                 # features.2
+            nn.Conv2d(16, 32, kernel_size=3),# features.3
+            nn.ReLU(),                       # features.4
+            nn.MaxPool2d(2),                 # features.5
+            nn.Conv2d(32, 64, kernel_size=3) # features.6
         )
-        self._feature_dim = 64
+        self._feature_dim = 64 * 3 * 3  # Based on 28x28 MNIST input
 
     @property
     def feature_dim(self) -> int:
@@ -460,34 +459,21 @@ def _build_feature_extractor(
         extractor_core = _ImageFeatureExtractor(input_channels=1, num_classes=10)
         num_classes = 10
 
-    # Build a small classifier head for pretraining
-    classifier = nn.Linear(extractor_core.feature_dim, num_classes)
-    full_model = nn.Sequential(extractor_core, classifier).to(device)
+    pretrained_path = f"pretrained_{dataset}_extractor.pth"
+    if os.path.exists(pretrained_path):
+        print(f"  [SemanticAnalyzer] Loading pretrained frozen extractor from {pretrained_path}")
+        extractor_core.load_state_dict(torch.load(pretrained_path, map_location=device), strict=True)
+    else:
+        # Loud Error: Strict enforcement to avoid falling back to untrained weights
+        raise FileNotFoundError(
+            f"\n\n[FATAL ERROR] Pre-trained feature extractor not found at '{pretrained_path}'.\n"
+            f"The Semantic Analyzer requires a decoupled, frozen feature extractor to prevent early-epoch noise.\n"
+            f"Please run the standalone utility script first:\n"
+            f"  python train_extractor.py\n\n"
+            f"(If using Tabular dataset 'ton_iot', ensure a pre-trained Autoencoder/MLP is saved at 'pretrained_ton_iot_extractor.pth')\n"
+        )
 
-    # Self-pretrain on available data
-    if train_loader is not None:
-        full_model.train()
-        optimizer = torch.optim.Adam(full_model.parameters(), lr=1e-3)
-        criterion = nn.CrossEntropyLoss()
-
-        pretrain_epochs = 3
-        max_batches = 20  # Limit pretraining to keep it fast
-
-        for ep in range(pretrain_epochs):
-            batch_count = 0
-            for images, labels in train_loader:
-                images = images.to(device)
-                labels = labels.to(device)
-                optimizer.zero_grad()
-                outputs = full_model(images)
-                loss = criterion(outputs, labels)
-                loss.backward()
-                optimizer.step()
-                batch_count += 1
-                if batch_count >= max_batches:
-                    break
-
-    # Freeze and return only the feature extractor (no classifier head)
+    # The extractor must never train or update.
     extractor_core.eval()
     for param in extractor_core.parameters():
         param.requires_grad = False
@@ -570,7 +556,7 @@ class SemanticDataDefense:
             self._ds = 0.3081
 
         # Build pretrained feature extractor (separate from FL model)
-        self.feature_extractor = _build_feature_extractor(
+        self.extractor = _build_feature_extractor(
             dataset, device, train_loader
         )
 
@@ -581,11 +567,31 @@ class SemanticDataDefense:
         # key: client_index (int), value: dict
         self._client_history: Dict[int, dict] = {}
 
-        # Global feature cache (average of all analyzed clients this round)
+        # Global feature proxy distribution (computed once from clean proxy data)
         self._global_feature: Optional[torch.Tensor] = None
+        if train_loader is not None:
+            self._compute_proxy_global_feature(train_loader)
 
         # Per-client scores from last round (for unsampled clients)
         self._cached_scores: Dict[int, Tuple[float, float]] = {}
+
+    def _compute_proxy_global_feature(self, train_loader) -> None:
+        """Compute the Global Data Distribution using clean proxy data."""
+        print("  [SemanticAnalyzer] Computing global data distribution from clean proxy data...")
+        self.extractor.eval()
+        features_list = []
+        max_samples = 1000  # Cap the number of proxy samples for MMD performance
+        total_samples = 0
+        with torch.no_grad():
+            for images, _ in train_loader:
+                feats = self.extractor(images.to(self.device))
+                features_list.append(feats.cpu())
+                total_samples += feats.shape[0]
+                if total_samples >= max_samples:
+                    break
+        if features_list:
+            self._global_feature = torch.cat(features_list, dim=0)[:max_samples]
+            print(f"  [SemanticAnalyzer] Global feature proxy computed. Shape: {self._global_feature.shape}")
 
     def _get_or_init_client(self, client_idx: int) -> dict:
         """Get client history entry, creating it if needed."""
@@ -649,7 +655,7 @@ class SemanticDataDefense:
             Feature tensor of shape (B, feature_dim).
         """
         with torch.no_grad():
-            features = self.feature_extractor(data.to(self.device))
+            features = self.extractor(data.to(self.device))
         return features.detach()
 
     def analyze(
@@ -713,13 +719,7 @@ class SemanticDataDefense:
                 print(f"  [SemanticAnalyzer] GI failed for client {global_idx}: {e}")
                 continue
 
-        # ── Step 3: Compute global feature average ──
-        if analyzed_features:
-            all_features = list(analyzed_features.values())
-            self._global_feature = torch.mean(
-                torch.stack(all_features, dim=0), dim=0
-            )
-        # If no clients analyzed, keep previous global feature
+        # ── Step 3: (Removed) Global distribution is now precomputed from proxy data ──
 
         # ── Step 4: Compute per-client MMD scores ──
         scores: Dict[int, Tuple[float, float]] = {}
