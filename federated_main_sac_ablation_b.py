@@ -103,7 +103,7 @@ def create_loggers(dataset, gar_name, skew):
         'Rollback_Triggered', 'Rollback_Reason',
         'Aggregation_Time_s',
     ]
-    all_logger = CSVLogger(os.path.join('results', f"all_results_{suffix}.csv"), all_cols)
+    all_logger = CSVLogger(os.path.join('results', f"ablation_b_all_results_{suffix}.csv"), all_cols)
     all_logger.write_header()
 
     paper_cols = [
@@ -112,7 +112,7 @@ def create_loggers(dataset, gar_name, skew):
         'Byz_Bypass_Count', 'Byz_Bypass_Rate', 'Benign_Selection_Rate', 'Num_Selected',
         'Aggregation_Time_s',
     ]
-    paper_logger = CSVLogger(os.path.join('results', f"paper_results_{suffix}.csv"), paper_cols)
+    paper_logger = CSVLogger(os.path.join('results', f"ablation_b_paper_results_{suffix}.csv"), paper_cols)
     paper_logger.write_header()
 
     sac_cols = [
@@ -124,7 +124,7 @@ def create_loggers(dataset, gar_name, skew):
         'C1_Dir_Score', 'C2_Dir_Score', 'C1_Mag_Ratio', 'C2_Mag_Ratio', 'Dir_Gap',
         'Replay_Buffer_Size',
     ]
-    sac_logger = CSVLogger(os.path.join('results', f"sac_results_{suffix}.csv"), sac_cols)
+    sac_logger = CSVLogger(os.path.join('results', f"ablation_b_sac_results_{suffix}.csv"), sac_cols)
     sac_logger.write_header()
 
     return all_logger, paper_logger, sac_logger
@@ -370,7 +370,7 @@ if __name__ == '__main__':
                 lr_actor=3e-4, lr_critic=3e-4, lr_alpha=3e-4,
                 gamma=0.99, tau=0.005,
                 buffer_size=10_000, batch_size=64,
-                init_alpha=0.2, target_entropy=-0.5,
+                init_alpha=0.2, target_entropy=-1.0,
                 device=str(device),
             )
             reward_calc = CompositeRewardCalculator(

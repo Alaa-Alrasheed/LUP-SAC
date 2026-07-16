@@ -91,7 +91,8 @@ class LUP_SAC(object):
 
     def aggregate(self, grads_original, user_grad_org_all, previous_grads,
                   score_matrix_client, f=10, epoch=1, g0=None, iteration=1,
-                  sac_agent=None, reward_calc=None, semantic_analyzer=None, **kwargs):
+                  sac_agent=None, reward_calc=None, semantic_analyzer=None,
+                  args=None, **kwargs):
         """
         Parameters
         ----------
@@ -390,6 +391,28 @@ class LUP_SAC(object):
             kurt_2 = np.mean(kurt_all[cluster_2_indices]) \
                 if len(cluster_2_indices) > 0 else 0.0
 
+            # ── Per-cluster direction & magnitude diagnostics ──
+            ema_ref = reward_calc._ema_grad if (reward_calc is not None
+                      and hasattr(reward_calc, '_ema_grad')
+                      and reward_calc._ema_grad is not None) else None
+            if ema_ref is not None:
+                _c1_flat = c1_mean_np.flatten()
+                _c2_flat = c2_mean_np.flatten()
+                _ema_norm = float(np.linalg.norm(ema_ref)) + 1e-10
+                c1_dir_score = float(
+                    np.dot(_c1_flat, ema_ref)
+                    / ((np.linalg.norm(_c1_flat) + 1e-10) * _ema_norm))
+                c2_dir_score = float(
+                    np.dot(_c2_flat, ema_ref)
+                    / ((np.linalg.norm(_c2_flat) + 1e-10) * _ema_norm))
+                c1_mag_ratio = float(np.linalg.norm(_c1_flat) / _ema_norm)
+                c2_mag_ratio = float(np.linalg.norm(_c2_flat) / _ema_norm)
+            else:
+                c1_dir_score = 0.0
+                c2_dir_score = 0.0
+                c1_mag_ratio = 1.0
+                c2_mag_ratio = 1.0
+
             # -- Determine alpha (continuous weight) --
             alpha_val = 1.0  # default: full weight on C1
 
@@ -419,6 +442,7 @@ class LUP_SAC(object):
                 )
 
                 alpha_val = sac_agent.select_action(state_s2)
+                alpha_pre_clip = alpha_val  # Raw SAC output before any clipping
 
                 # ================================================================
                 #  BURN-IN PHASE: Override SAC during early epochs
@@ -437,12 +461,43 @@ class LUP_SAC(object):
                     elif alpha_val < 0.15:
                         alpha_val = 0.0
 
+                # ── Synchronous safety gate (semantic + direction + magnitude) ──
+                sync_gate_fired = False
+                r_dist_prospective = 0.0
+                gate_info = {'fired': False, 'semantic': False,
+                             'direction': False, 'magnitude': False,
+                             'c1_dir_score': c1_dir_score, 'c2_dir_score': c2_dir_score,
+                             'c1_mag_ratio': c1_mag_ratio, 'c2_mag_ratio': c2_mag_ratio,
+                             'alpha_pre_clip': alpha_pre_clip}
+                if (semantic_analyzer is not None and reward_calc is not None
+                        and s_c1_cg is not None and s_c2_cg is not None):
+                    alpha_val, r_dist_prospective, gate_info = \
+                        reward_calc.evaluate_synchronous_gate(
+                            s_c1_cg, s_c2_cg,
+                            c1_dir_score, c2_dir_score,
+                            c1_mag_ratio, c2_mag_ratio,
+                            alpha_val, self._prev_alpha, args)
+                    sync_gate_fired = gate_info['fired']
+                    # Carry raw diagnostic scores through for telemetry
+                    gate_info['c1_dir_score'] = c1_dir_score
+                    gate_info['c2_dir_score'] = c2_dir_score
+                    gate_info['c1_mag_ratio'] = c1_mag_ratio
+                    gate_info['c2_mag_ratio'] = c2_mag_ratio
+
                 self._prev_alpha = alpha_val
 
                 # Cache for delayed reward
                 sac_agent.cache_pending(state_s2, alpha_val)
             else:
                 # FALLBACK: original static heuristic for binary selection
+                alpha_pre_clip = alpha_val  # No SAC in fallback; raw = final
+                sync_gate_fired = False
+                r_dist_prospective = 0.0
+                gate_info = {'fired': False, 'semantic': False,
+                             'direction': False, 'magnitude': False,
+                             'c1_dir_score': c1_dir_score, 'c2_dir_score': c2_dir_score,
+                             'c1_mag_ratio': c1_mag_ratio, 'c2_mag_ratio': c2_mag_ratio,
+                             'alpha_pre_clip': alpha_pre_clip}
                 if (len(cluster_2_indices) != 0
                         and score_cluster_2 >= score_cluster_1):
                     if (
@@ -452,6 +507,21 @@ class LUP_SAC(object):
                         (absolute_deviation_2 > absolute_deviation_1 and dev_2 < dev_1 and kurt_2 > kurt_1)
                     ):
                         alpha_val = 0.0  # full weight on C2
+
+                # ── Synchronous safety gate (fallback branch) ──
+                if (semantic_analyzer is not None and reward_calc is not None
+                        and s_c1_cg is not None and s_c2_cg is not None):
+                    alpha_val, r_dist_prospective, gate_info = \
+                        reward_calc.evaluate_synchronous_gate(
+                            s_c1_cg, s_c2_cg,
+                            c1_dir_score, c2_dir_score,
+                            c1_mag_ratio, c2_mag_ratio,
+                            alpha_val, self._prev_alpha, args)
+                    sync_gate_fired = gate_info['fired']
+                    gate_info['c1_dir_score'] = c1_dir_score
+                    gate_info['c2_dir_score'] = c2_dir_score
+                    gate_info['c1_mag_ratio'] = c1_mag_ratio
+                    gate_info['c2_mag_ratio'] = c2_mag_ratio
 
             # -- Norm-clip each cluster mean independently --
             c1_norm = torch.norm(c1_mean)
@@ -505,4 +575,4 @@ class LUP_SAC(object):
         score_matrix_client[benign_list] += 1
 
         # global_grad is already computed as the weighted combination above
-        return global_grad, benign_list, alpha_val
+        return global_grad, benign_list, alpha_val, sync_gate_fired, r_dist_prospective, gate_info

@@ -267,7 +267,8 @@ class SACAgent:
         Returns dict of losses for logging.
         """
         if len(self.memory) < self.batch_size:
-            return {'critic_loss': 0.0, 'actor_loss': 0.0, 'alpha': self.alpha}
+            return {'critic_loss': 0.0, 'actor_loss': 0.0, 'alpha': self.alpha,
+                    'alpha_loss': 0.0, 'alpha_grad_norm': 0.0}
 
         states, actions, rewards, next_states, dones = self.memory.sample(
             self.batch_size)
@@ -311,6 +312,8 @@ class SACAgent:
 
         self.alpha_optim.zero_grad()
         alpha_loss.backward()
+        # Capture gradient norm on log_alpha BEFORE the optimizer step
+        alpha_grad_norm = float(torch.norm(self.log_alpha.grad).item())
         self.alpha_optim.step()
 
         # ──── Soft-update target critic ──── #
@@ -320,6 +323,8 @@ class SACAgent:
             'critic_loss': critic_loss.item(),
             'actor_loss': actor_loss.item(),
             'alpha': self.alpha,
+            'alpha_loss': alpha_loss.item(),
+            'alpha_grad_norm': alpha_grad_norm,
         }
 
     def _soft_update(self):
