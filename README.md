@@ -121,9 +121,13 @@ The framework is highly customizable. Below are the available command-line argum
 * `--device` (str): Compute device. Set to `cuda:0` for GPU or `cpu`. (Default: `cpu`)
 
 ### Semantic Data Defense & Veto Parameters
+> **IMPORTANT: Frozen Pre-trained Extractor**: The Semantic Analyzer requires a pre-trained feature extractor to avoid early-epoch noise. Run `python train_extractor.py` prior to launching the main framework to generate the necessary `.pth` weights file.
+
 * `--semantic` / `--no-semantic`: Enable or disable the Semantic Distribution Defense module via Gradient Inversion. (Default: `True`)
 * `--semantic_veto_threshold` (float): The MMD penalty threshold that triggers a hard reward override (Semantic Veto). (Default: `-0.015`)
 * `--semantic_penalty_value` (float): The hard negative reward applied when the semantic veto fires. (Default: `-1.0`)
+* `--direction_veto_threshold` (float): Cosine similarity to EMA below this value triggers a directional veto. (Default: `0.0`)
+* `--mag_veto_factor` (float): Cluster-to-EMA magnitude ratio above this triggers a magnitude veto. (Default: `2.0`)
 * `--semantic_sample_ratio` (float): Fraction of clients analyzed via Gradient Inversion per round. (Default: `0.3`)
 * `--semantic_decay` (float): Temporal decay factor for unsampled client semantic scores. (Default: `0.9`)
 * `--gi_iterations` (int): Max gradient inversion optimization steps. Set to `-1` for auto-scaling. (Default: `-1`)
