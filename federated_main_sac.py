@@ -17,8 +17,9 @@ import torch
 import torch.nn as nn
 from datasets.mnist_loader import get_mnist_dataset
 from datasets.ton_iot_loader import get_ton_iot_dataset
+from datasets.cifar_loader import get_cifar10_dataset
 from clients.client_update import benignWorker, byzantineWorker, test_classification
-from models import CNN, ResNet18, CifarCNN, RNNClassifier, MLP
+from models import CNN, ResNet18, CifarCNN, RNNClassifier, MLP, ResNet9, CIFARDenseNet121
 from server.aggregation import LUP_SAC
 from attacks import attack
 from options import args_parser
@@ -87,9 +88,9 @@ class CSVLogger:
             f.write(','.join(str(row_dict.get(c, '')) for c in self.columns) + '\n')
 
 
-def create_loggers(dataset, gar_name, skew):
+def create_loggers(dataset, gar_name, skew, seed, attack_name):
     os.makedirs('results', exist_ok=True)
-    suffix = f"{dataset}_{gar_name}_{skew}"
+    suffix = f"{dataset}_{attack_name}_{gar_name}_{skew}_seed{seed}"
 
     all_cols = [
         'Attack', 'Epoch',
@@ -307,11 +308,13 @@ if __name__ == '__main__':
 
         if args.dataset == 'ton_iot':
             train_loader, test_loader = get_ton_iot_dataset(args)
+        elif args.dataset == 'cifar':
+            train_loader, test_loader = get_cifar10_dataset(args)
         else:
             train_loader, test_loader = get_mnist_dataset(args)
 
         all_logger, paper_logger, sac_logger = create_loggers(
-            args.dataset, gar_name, args.skew)
+            args.dataset, gar_name, args.skew, args.seed, args.attack)
 
         print(f"\n{'='*60}")
         print(f"  Output files:")
@@ -339,7 +342,12 @@ if __name__ == '__main__':
             elif args.dataset == 'AGNews':
                 global_model = RNNClassifier().to(device)
             elif args.dataset == 'cifar':
-                global_model = CifarCNN().to(device)
+                if args.model == 'resnet9':
+                    global_model = ResNet9().to(device)
+                elif args.model == 'densenet121':
+                    global_model = CIFARDenseNet121().to(device)
+                else:
+                    global_model = CifarCNN().to(device)
             elif args.dataset == 'fmnist':
                 global_model = CNN().to(device)
             else:
@@ -388,7 +396,7 @@ if __name__ == '__main__':
 
             # ── Rollback checkpoint (secondary safety net) ──
             best_checkpoint = copy.deepcopy(global_model.state_dict())
-            best_accuracy = 0.0
+            checkpoint_accuracy = None
             prev_accuracy = 0.0
             collapse_loss_target = float(np.log(args.num_classes))  # ln(10)≈2.302
             collapse_loss_epsilon = 0.0005  # tight: genuine dead-network only
@@ -443,7 +451,7 @@ if __name__ == '__main__':
                 rollback_triggered = False
                 rollback_reason = 'none'
 
-                if (collapse_by_loss or collapse_by_acc) and epoch > 0:
+                if collapse_by_loss or collapse_by_acc:
                     rollback_triggered = True
                     if collapse_by_loss and collapse_by_acc:
                         rollback_reason = 'both'
@@ -458,15 +466,16 @@ if __name__ == '__main__':
                           f"delta={abs(test_loss_val - collapse_loss_target):.6f}), "
                           f"accuracy={accuracy_val:.2f}% "
                           f"(prev={prev_accuracy:.2f}%, "
-                          f"best={best_accuracy:.2f}%, "
                           f"dropped {prev_accuracy - accuracy_val:.1f}pp). "
                           f"Rolling back to last good checkpoint.")
                     global_model.load_state_dict(
                         copy.deepcopy(best_checkpoint))
+                    accuracy_val = checkpoint_accuracy if checkpoint_accuracy is not None else 0.0
+                    metrics['accuracy'] = accuracy_val
                 else:
                     # Model is healthy — update high-water mark if improved
-                    if accuracy_val >= best_accuracy:
-                        best_accuracy = accuracy_val
+                    if checkpoint_accuracy is None or accuracy_val >= checkpoint_accuracy:
+                        checkpoint_accuracy = accuracy_val
                         best_checkpoint = copy.deepcopy(global_model.state_dict())
 
                 prev_accuracy = accuracy_val

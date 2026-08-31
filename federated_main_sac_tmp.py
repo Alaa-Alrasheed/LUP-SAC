@@ -26,9 +26,6 @@ import tools
 import time
 import copy
 import warnings
-# NOTE (Aug 2026): This ablation harness is SUPERSEDED.
-# Its only experimental change (target_entropy=-1.0) was validated and merged into the main 
-# production harness (federated_main_sac.py). This file is kept for historical reference only.
 import os
 import pandas as pd
 from sklearn.metrics import precision_score, recall_score, f1_score
@@ -37,6 +34,8 @@ from agents.sac_agent import SACAgent
 from agents.fl_env import CompositeRewardCalculator
 from server.semantic_analyzer import SemanticDataDefense
 
+torch.manual_seed(0)
+np.random.seed(0)
 warnings.filterwarnings("ignore")
 
 
@@ -90,7 +89,7 @@ class CSVLogger:
 
 def create_loggers(dataset, gar_name, skew):
     os.makedirs('results', exist_ok=True)
-    suffix = f"{dataset}_{gar_name}_{skew}"
+    suffix = f"{dataset}_{gar_name}_{skew}_tmp"
 
     all_cols = [
         'Attack', 'Epoch',
@@ -104,7 +103,7 @@ def create_loggers(dataset, gar_name, skew):
         'Rollback_Triggered', 'Rollback_Reason',
         'Aggregation_Time_s',
     ]
-    all_logger = CSVLogger(os.path.join('results', f"ablation_b_all_results_{suffix}.csv"), all_cols)
+    all_logger = CSVLogger(os.path.join('results', f"all_results_{suffix}.csv"), all_cols)
     all_logger.write_header()
 
     paper_cols = [
@@ -113,7 +112,7 @@ def create_loggers(dataset, gar_name, skew):
         'Byz_Bypass_Count', 'Byz_Bypass_Rate', 'Benign_Selection_Rate', 'Num_Selected',
         'Aggregation_Time_s',
     ]
-    paper_logger = CSVLogger(os.path.join('results', f"ablation_b_paper_results_{suffix}.csv"), paper_cols)
+    paper_logger = CSVLogger(os.path.join('results', f"paper_results_{suffix}.csv"), paper_cols)
     paper_logger.write_header()
 
     sac_cols = [
@@ -125,7 +124,7 @@ def create_loggers(dataset, gar_name, skew):
         'C1_Dir_Score', 'C2_Dir_Score', 'C1_Mag_Ratio', 'C2_Mag_Ratio', 'Dir_Gap',
         'Replay_Buffer_Size',
     ]
-    sac_logger = CSVLogger(os.path.join('results', f"ablation_b_sac_results_{suffix}.csv"), sac_cols)
+    sac_logger = CSVLogger(os.path.join('results', f"sac_results_{suffix}.csv"), sac_cols)
     sac_logger.write_header()
 
     return all_logger, paper_logger, sac_logger
@@ -302,14 +301,6 @@ if __name__ == '__main__':
 
     for gar_name in GAR_keys:
         args = args_parser()
-        
-        import random
-        random.seed(args.seed)
-        np.random.seed(args.seed)
-        torch.manual_seed(args.seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(args.seed)
-            
         args.device = torch.device(
             "cuda" if torch.cuda.is_available() else "cpu")
         device = args.device
@@ -379,7 +370,7 @@ if __name__ == '__main__':
                 lr_actor=3e-4, lr_critic=3e-4, lr_alpha=3e-4,
                 gamma=0.99, tau=0.005,
                 buffer_size=10_000, batch_size=64,
-                init_alpha=0.2, target_entropy=-1.0,
+                init_alpha=0.2, target_entropy=-0.5,
                 device=str(device),
             )
             reward_calc = CompositeRewardCalculator(
@@ -397,7 +388,7 @@ if __name__ == '__main__':
 
             # ── Rollback checkpoint (secondary safety net) ──
             best_checkpoint = copy.deepcopy(global_model.state_dict())
-            best_accuracy = 0.0
+            checkpoint_accuracy = None
             prev_accuracy = 0.0
             collapse_loss_target = float(np.log(args.num_classes))  # ln(10)≈2.302
             collapse_loss_epsilon = 0.0005  # tight: genuine dead-network only
@@ -452,7 +443,7 @@ if __name__ == '__main__':
                 rollback_triggered = False
                 rollback_reason = 'none'
 
-                if (collapse_by_loss or collapse_by_acc) and epoch > 0:
+                if collapse_by_loss or collapse_by_acc:
                     rollback_triggered = True
                     if collapse_by_loss and collapse_by_acc:
                         rollback_reason = 'both'
@@ -467,15 +458,16 @@ if __name__ == '__main__':
                           f"delta={abs(test_loss_val - collapse_loss_target):.6f}), "
                           f"accuracy={accuracy_val:.2f}% "
                           f"(prev={prev_accuracy:.2f}%, "
-                          f"best={best_accuracy:.2f}%, "
                           f"dropped {prev_accuracy - accuracy_val:.1f}pp). "
                           f"Rolling back to last good checkpoint.")
                     global_model.load_state_dict(
                         copy.deepcopy(best_checkpoint))
+                    accuracy_val = checkpoint_accuracy
+                    metrics['accuracy'] = checkpoint_accuracy
                 else:
                     # Model is healthy — update high-water mark if improved
-                    if accuracy_val >= best_accuracy:
-                        best_accuracy = accuracy_val
+                    if checkpoint_accuracy is None or accuracy_val >= checkpoint_accuracy:
+                        checkpoint_accuracy = accuracy_val
                         best_checkpoint = copy.deepcopy(global_model.state_dict())
 
                 prev_accuracy = accuracy_val
@@ -535,7 +527,7 @@ if __name__ == '__main__':
             print_attack_summary(attack_name, attack_rows)
 
             os.makedirs('checkpoints', exist_ok=True)
-            ckpt_path = os.path.join('checkpoints', f"sac_ckpt_{args.dataset}_{attack_name}_{args.num_byzs}_{gar_name}.pt")
+            ckpt_path = os.path.join('checkpoints', f"sac_ckpt_{args.dataset}_{attack_name}_{args.num_byzs}_{gar_name}_tmp.pt")
             sac_agent.save(ckpt_path)
             print(f"  [v] SAC checkpoint saved to {ckpt_path}")
 

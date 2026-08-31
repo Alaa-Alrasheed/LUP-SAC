@@ -63,8 +63,11 @@ python federated_main_sac.py --dataset ton_iot
 ```bash
 python federated_main_sac.py --dataset cifar
 ```
-> **Note on CIFAR-10 Models**: By default, CIFAR-10 runs with the standard `CifarCNN` model. The paper also evaluated `DenseNet121` and `ResNet-9`. To use those, you will need to manually instantiate them in `federated_main_sac.py` instead of `CifarCNN`.
-
+> **Note on CIFAR-10 Models**: By default, CIFAR-10 runs with the standard `CifarCNN` model. The paper also evaluated `DenseNet121` and `ResNet-9`. You can specify these using the `--model` argument:
+```bash
+python federated_main_sac.py --dataset cifar --model resnet9
+python federated_main_sac.py --dataset cifar --model densenet121
+```
 ---
 
 ## Results Logging & Analytics

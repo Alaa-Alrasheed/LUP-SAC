@@ -32,6 +32,8 @@ def args_parser():
     # other arguments
     parser.add_argument('--dataset', type=str, default='mnist',
                         help="name of dataset")
+    parser.add_argument('--model', type=str, default='cnn',
+                        help="name of model (e.g. cnn, resnet9, densenet121)")
     parser.add_argument('--num_classes', type=int, default=10, help="number of classes")
     parser.add_argument('--device', default='cpu', help="To use cuda, set to a specific GPU ID. Default set to use CPU.")#cuda:0
     parser.add_argument('--optimizer', type=str, default='sgd', help="type of optimizer")
@@ -39,7 +41,7 @@ def args_parser():
                         help='Default set to IID. Set to 0 for non-IID.')
     parser.add_argument('--skew', type=float, default=0.5,
                         help='Default set to IID. Set to 0 for non-IID.')
-    # parser.add_argument('--seed', type=int, default=1, help='random seed')
+    parser.add_argument('--seed', type=int, default=1, help='random seed')
 
     # ── Semantic Distribution Analysis ──
     parser.add_argument('--semantic', action='store_true', default=True,

@@ -389,7 +389,11 @@ class _ImageFeatureExtractor(nn.Module):
             nn.MaxPool2d(2),                 # features.5
             nn.Conv2d(32, 64, kernel_size=3) # features.6
         )
-        self._feature_dim = 64 * 3 * 3  # Based on 28x28 MNIST input
+        # Dynamically determine feature dim based on input_channels (1 for MNIST, 3 for CIFAR)
+        if input_channels == 1:
+            self._feature_dim = 64 * 3 * 3  # Based on 28x28 MNIST input
+        else:
+            self._feature_dim = 64 * 4 * 4  # Based on 32x32 CIFAR-10 input
 
     @property
     def feature_dim(self) -> int:
