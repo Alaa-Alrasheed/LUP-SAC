@@ -2,17 +2,24 @@
 # =============================================================================
 # LUP_SAC.py — LUP aggregator with SAC-based continuous cluster weighting.
 #
-# KEY DIFFERENCES:
-#   • Stage 1 (MAD filtering): uses the ORIGINAL static heuristic
-#     (no RL intervention).
-#   • Stage 2 (AHC cluster selection): instead of binary pick-one,
-#     the SAC agent outputs α ∈ [0,1] and the global gradient is:
+# KEY DIFFERENCES vs. paper LUP:
+#   • Pre-clustering heuristic (Stage 1, lines ~179-215): the ORIGINAL paper
+#     static heuristic is preserved here, running BEFORE clustering to decide
+#     which MAD-filtered half is the candidate-honest set.
+#   • Post-clustering decision (Stage 2): instead of the paper's binary
+#     genuine-criterion pick-one, the SAC agent outputs α ∈ [0,1] and the
+#     global gradient is:
 #         G = α · NormClip(Mean(C₁)) + (1-α) · NormClip(Mean(C₂))
+#   • Clustering algorithm: replaced AHC with GMM + Cosine Sanity Check
+#     (run_ensemble_filter in ensemble_filter.py).
 #
 # PRESERVED EXACTLY from original LUP.py:
 #   • MAD-based norm bounding
-#   • Feature extraction loop
-#   • Agglomerative Hierarchical Clustering
+#   • Feature extraction loop (7 statistical features)
+#   • Pre-clustering static heuristic math (grad_sim / kurt / dev comparisons)
+# =============================================================================
+# NOTE: AgglomerativeClustering was removed; GMM is used instead via
+# run_ensemble_filter(). See server/ensemble_filter.py for details.
 # =============================================================================
 
 from numpy.core.fromnumeric import partition
@@ -34,7 +41,8 @@ from sklearn.decomposition import PCA
 from sklearn.covariance import MinCovDet
 from sklearn.metrics import pairwise_distances
 from sklearn.decomposition import PCA
-from sklearn.cluster import AgglomerativeClustering
+# AgglomerativeClustering removed — GMM + Cosine Sanity Check is used instead
+# (see run_ensemble_filter in server/ensemble_filter.py)
 import matplotlib.pyplot as plt
 from scipy.cluster.hierarchy import dendrogram
 from scipy.stats import mstats
@@ -160,7 +168,7 @@ class LUP_SAC(object):
             if semantic_analyzer is not None:
                 # We only need to analyze clients that passed MAD filtering
                 # (or we could analyze all of them; for efficiency, we analyze all
-                # clients because AHC uses them all later).
+                # clients because GMM clustering uses them all later).
                 # Flattened gradients:
                 client_grads_flattened = []
                 for i in range(num_clients):
@@ -215,9 +223,10 @@ class LUP_SAC(object):
                     filtered_indices_list = filtered_indices_list_other
 
             # ================================================================
-            # ====  FEATURE EXTRACTION + AHC CLUSTERING  =====================
+            # ====  FEATURE EXTRACTION + GMM CLUSTERING  =====================
             # ====  (Enhanced with directional features for Label-Flip /   ===
             # ====   Sign-Flip isolation)                                  ===
+            # ====  Clustering delegated to run_ensemble_filter()          ===
             # ================================================================
             features_list = []
             layer_grad = []
@@ -322,7 +331,7 @@ class LUP_SAC(object):
                 features_list[i].append(historical_cos_sims[i])
                 features_list[i].append(pairwise_ang_dists[i])
 
-            # ── Normalize all features for AHC ──
+            # ── Normalize all features for GMM ──
             # MinMaxScaler bounds magnitude features to [0, 1] without
             # shifting the origin, preserving angular geometry for Euclidean.
             if len(features_list) > 1:

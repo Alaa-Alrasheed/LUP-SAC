@@ -3,13 +3,13 @@
 # sac_agent.py — Soft Actor-Critic agent for LUP genuine-cluster weighting.
 #
 # Replaces the discrete DQN with a continuous action α ∈ [0, 1] that
-# controls the weighted combination of the two AHC clusters.
+# controls the SAC-weighted combination of the two GMM clusters.
 #
 # Components:
 #   • GaussianActor  — outputs μ, log_σ, samples via reparameterization
 #   • QCritic        — clipped double-Q (two Q-networks)
 #   • SACAgent       — full off-policy agent with automatic entropy tuning
-#   • build_state_vector()       — same 12-dim state as dqn_agent.py
+#   • build_state_vector()  — 12-dim (base) or 20-dim (with semantic features)
 # =============================================================================
 
 import random

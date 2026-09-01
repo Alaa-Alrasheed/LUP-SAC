@@ -63,13 +63,14 @@ def args_parser():
     parser.add_argument('--semantic_penalty_value', type=float, default=-1.0,
                         help='The hard negative reward applied when the veto fires.')
 
-    # ── Synchronous Gate: Direction & Magnitude ──
     parser.add_argument('--direction_veto_threshold', type=float, default=0.0,
-                        help='Cosine similarity to EMA below this triggers directional veto '
-                             '(0.0 = any negative alignment is suspicious).')
+                        help='Cosine similarity to EMA below this is flagged as directional risk '
+                             '(logged in gate_info["direction"]). Diagnostic-only: does NOT '
+                             'currently override alpha — only semantic check enforces.')
     parser.add_argument('--mag_veto_factor', type=float, default=2.0,
-                        help='Cluster magnitude / EMA magnitude ratio above this triggers '
-                             'magnitude veto (matches CompositeRewardCalculator default).')
+                        help='Cluster magnitude / EMA magnitude ratio above this is flagged as '
+                             'magnitude risk (logged in gate_info["magnitude"]). Diagnostic-only: '
+                             'does NOT currently override alpha — only semantic check enforces.')
 
     args = parser.parse_args()
     return args
